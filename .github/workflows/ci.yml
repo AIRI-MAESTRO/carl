@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # Allow other workflows (e.g. mirror.yml) to gate on lint + tests by
+  # calling this workflow as a reusable job.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint + tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    # The suite runs in ~40s locally; anything past a few minutes is a hang,
+    # not slowness. GitHub's default is 360 minutes — cap it so a stuck job
+    # fails fast instead of holding a runner for six hours.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          # uv.lock is .gitignored (absent in CI), so the default
+          # `**/uv.lock` cache key matches nothing and setup-uv errors.
+          # Key the cache on pyproject.toml instead.
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Set up Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Sync dependencies
+        # The `ci` dependency-group (ruff + pytest + pytest-asyncio) is in
+        # `tool.uv.default-groups`, so a bare `uv sync` installs the lint and
+        # test tooling alongside the project's runtime deps.
+        run: uv sync
+
+      - name: Run ruff
+        run: uv run ruff check .
+
+      - name: Run pytest
+        # `addopts` in pyproject.toml already deselects the `live`,
+        # `mcp_live` and `skill_runtime_live` markers, so this run is
+        # hermetic: no API keys, no MCP subprocess, no container runtime.
+        # Tests for optional extras `importorskip` and skip cleanly.
+        #
+        # --timeout: the slowest test locally is ~5s (a deliberate sleep), so
+        # 90s is far above any legitimate runtime. Several tests spawn real
+        # subprocesses and read their pipes; if one of those blocks on Linux
+        # the job would otherwise hang forever. pytest-timeout fails just
+        # that test, names it, and lets the rest of the suite report.
+        # --durations surfaces anything creeping toward the limit.
+        run: uv run pytest -q --timeout=90 --durations=20

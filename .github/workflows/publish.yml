@@ -1,0 +1,70 @@
+name: Publish to PyPI
+
+# Manual release flow: push a `v*` tag → build with uv → publish to PyPI via
+# Trusted Publishing (OIDC). No PyPI token lives in repo secrets; the `pypi`
+# environment must be configured with a trusted publisher.
+#
+# release.yml covers the automatic path (green CI on main + new version).
+# This workflow is the explicit, tag-driven escape hatch.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    # The public mirror (AIRI-MAESTRO/carl) receives a copy of this file. Only
+    # the source repo owns publishing, so the mirror never races us to PyPI.
+    if: github.repository == 'Glazkoff/carl'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          # uv.lock is .gitignored; key the cache on pyproject.toml.
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Upload dist artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI (Trusted Publishing)
+    needs: build
+    runs-on: ubuntu-latest
+    # Gates the publish on the `pypi` environment so a maintainer can
+    # require manual approval + scope the OIDC trusted publisher.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mmar-carl
+    permissions:
+      # OIDC token for PyPI Trusted Publishing — no password/token needed.
+      id-token: write
+    steps:
+      - name: Download dist artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish via PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # release.yml publishes and then pushes `v<version>`, which lands
+          # right back here. Without this the re-upload 400s and the run goes
+          # red on every successful release. Treat "already on PyPI" as a
+          # no-op so this workflow stays a genuine manual escape hatch.
+          skip-existing: true

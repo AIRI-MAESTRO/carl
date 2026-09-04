@@ -1,0 +1,90 @@
+name: Release to PyPI
+
+# Runs only after the CI workflow (lint + tests) finishes successfully on
+# main. If CI was green and the pyproject version isn't on PyPI yet, build
+# and publish `mmar-carl`. Tests therefore always gate the release.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  check-version:
+    # Skip entirely unless the triggering CI run passed. The repository guard
+    # keeps the public mirror (AIRI-MAESTRO/carl), which receives a copy of
+    # this file, from attempting its own PyPI release on every mirror push.
+    if: >-
+      ${{ github.event.workflow_run.conclusion == 'success'
+          && github.repository == 'Glazkoff/carl' }}
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Build/inspect the exact commit CI tested, not the branch tip.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Check whether version is already on PyPI
+        id: check
+        run: |
+          version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
+          echo "pyproject version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          status=$(curl -s -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/mmar-carl/$version/json")
+          echo "PyPI lookup HTTP status: $status"
+          case "$status" in
+            200)
+              echo "Version $version already on PyPI — nothing to publish."
+              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "Version $version not on PyPI — will publish."
+              echo "should_publish=true" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "Unexpected status $status from PyPI; refusing to guess." >&2
+              exit 1
+              ;;
+          esac
+
+  release:
+    needs: check-version
+    if: needs.check-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # push the v<version> tag
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          # uv.lock is .gitignored; key the cache on pyproject.toml.
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Build sdist + wheel
+        # `uv_build` packages only the `src/mmar_carl/` tree, so no dev-only
+        # files or optional extras leak into the distribution.
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+      - name: Tag the release
+        run: |
+          version="${{ needs.check-version.outputs.version }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "Tag v$version already exists — skipping."
+          else
+            git tag "v$version"
+            git push origin "v$version"
+          fi
